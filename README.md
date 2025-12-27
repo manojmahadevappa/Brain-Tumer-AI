@@ -757,7 +757,7 @@ This project is licensed for **research and educational purposes only**.
 For issues, questions, or contributions:
 
 - **GitHub Issues**: [Report a bug](https://github.com/manojmahadevappa/Brain-Tumer-AI/issues)
-- **Email**: support@mediscopeai.example.com
+- **Email**: manojmahadevappam@gmail.com
 - **Documentation**: [Full docs](https://docs.mediscopeai.example.com)
 
 ---
