@@ -685,7 +685,7 @@ def ensure_model_loaded():
         def _load_resnet_ckpt(path):
             if not os.path.exists(path):
                 return None, None
-            m = models.resnet18(pretrained=False)
+            m = models.resnet18(weights=None)
             # default multiclass head
             m.fc = nn.Linear(m.fc.in_features, 3)
             state = _torch.load(path, map_location=device)

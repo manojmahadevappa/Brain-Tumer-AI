@@ -3,15 +3,17 @@
 import torch
 import torch.nn as nn
 from torchvision import models
+from torchvision.models import ResNet18_Weights
 
 
 class ResNetMultimodal(nn.Module):
     def __init__(self, out_dim=2, pretrained=True):
         super().__init__()
         # two simple backbones (e.g., for CT and MRI)
-        self.backbone_a = models.resnet18(pretrained=pretrained)
+        weights = ResNet18_Weights.DEFAULT if pretrained else None
+        self.backbone_a = models.resnet18(weights=weights)
         self.backbone_a.fc = nn.Identity()
-        self.backbone_b = models.resnet18(pretrained=pretrained)
+        self.backbone_b = models.resnet18(weights=weights)
         self.backbone_b.fc = nn.Identity()
         feat_dim = 512 + 512
         self.classifier = nn.Sequential(

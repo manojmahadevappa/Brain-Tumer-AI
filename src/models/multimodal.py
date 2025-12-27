@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torchvision import models
+from torchvision.models import ResNet18_Weights
 import torch.nn.functional as F
 
 
@@ -18,14 +19,15 @@ class MultiModalNet(nn.Module):
     def __init__(self, num_classes=3, share_weights=False, pretrained=False):
         super().__init__()
         # CT encoder
-        self.ct_encoder = models.resnet18(pretrained=pretrained)
+        weights = ResNet18_Weights.DEFAULT if pretrained else None
+        self.ct_encoder = models.resnet18(weights=weights)
         self.ct_encoder.fc = nn.Identity()
 
         # MRI encoder
         if share_weights:
             self.mri_encoder = self.ct_encoder
         else:
-            self.mri_encoder = models.resnet18(pretrained=pretrained)
+            self.mri_encoder = models.resnet18(weights=weights)
             self.mri_encoder.fc = nn.Identity()
 
         # feature dim from resnet18 final (512)
