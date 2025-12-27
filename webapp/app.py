@@ -767,45 +767,32 @@ def ensure_model_loaded():
             return mm, num_classes
 
         # Try explicit binary + multiclass filenames first
-        bin_path = 'model_binary.pth'
+        # MEMORY OPTIMIZATION: Load only multiclass model for Render free tier (512MB limit)
+        # The multiclass model can handle both CT and MRI, so we skip binary model
         multi_path = 'model_multiclass.pth'
 
-        mb, nb = _load_resnet_ckpt(bin_path)
         # Prefer loading a multimodal checkpoint for the multiclass path
         mm, nm = _load_multimodal_ckpt(multi_path)
         if mm is None:
           mm, nm = _load_resnet_ckpt(multi_path)
 
-        # If explicit files not present, try fallback to model_basic.pth
-        if mb is None and mm is None:
+        # If multiclass not found, try fallback to model_basic.pth
+        if mm is None:
             basic_path = 'model_basic.pth'
             if not os.path.exists(basic_path):
-                return False, f'No model checkpoint found (tried {bin_path}, {multi_path}, {basic_path})', None
+                return False, f'No model checkpoint found (tried {multi_path}, {basic_path})', None
             # basic model may be resnet or multimodal
-            mbasic, nbasic = _load_resnet_ckpt(basic_path)
-            if mbasic is None:
-              mbasic, nbasic = _load_multimodal_ckpt(basic_path)
-            if nbasic == 2:
-                mb = mbasic
-                nb = nbasic
-            elif nbasic == 3:
-                mm = mbasic
-                nm = nbasic
+            mm, nm = _load_multimodal_ckpt(basic_path)
+            if mm is None:
+              mm, nm = _load_resnet_ckpt(basic_path)
 
         # assign globals and label maps appropriately
-        if mb is not None:
-            MODEL_BIN = mb
-            if nb == 2:
-                LABEL_MAP_BIN = {0: 'Healthy', 1: 'Tumor'}
         if mm is not None:
             MODEL_MULTI = mm
             # Keep the default LABEL_MAP_MULTI defined at module level
             print(f"\n🔧 Model loaded: MULTICLASS/MULTIMODAL with {nm} classes")
             print(f"🏷️  Using LABEL_MAP_MULTI: {LABEL_MAP_MULTI}")
-
-        if mb is not None:
-            print(f"\n🔧 Model loaded: BINARY with {nb} classes")
-            print(f"🏷️  Using LABEL_MAP_BIN: {LABEL_MAP_BIN}")
+            print(f"💾 Memory optimization: Using only multiclass model (handles both CT and MRI)")
 
         # expose commonly used modules to module globals for predict()
         torch = _torch
@@ -4744,37 +4731,44 @@ async def predict(
       
       try:
         with torch.no_grad():
-          if MODEL_BIN is None:
-            raise RuntimeError('No CT/binary model available')
+          # Use multiclass model for CT-only (memory optimization for Render)
+          if MODEL_MULTI is None:
+            raise RuntimeError('No model available')
           
           print("\n" + "="*60)
-          print("🔬 BINARY MODEL INFERENCE (CT ONLY)")
+          print("🔬 MULTICLASS MODEL INFERENCE (CT ONLY)")
           print("="*60)
+          print("💾 Using multiclass model for CT (memory optimized)")
           
-          out1 = MODEL_BIN(ct_inp)
-          print(f"📈 Raw Logits: {out1.cpu().numpy()[0]}")
-          
-          probs1 = torch.softmax(out1, dim=1).cpu().numpy()[0].tolist()
-          pred1 = int(out1.argmax(dim=1).item())
-          
-          print(f"\n🎯 Prediction Index: {pred1}")
-          print(f"📊 Probabilities: {[f'{p:.4f}' for p in probs1]}")
-          print(f"🏷️  Label Map: {LABEL_MAP_BIN}")
-          
-          final_probs = probs1
-          final_prediction = LABEL_MAP_BIN.get(pred1, str(pred1))
-          
-          print(f"\n✅ Final Prediction: {final_prediction}")
-          print(f"   Class 0 ({LABEL_MAP_BIN.get(0, 'Unknown')}): {probs1[0]*100:.2f}%")
-          print(f"   Class 1 ({LABEL_MAP_BIN.get(1, 'Unknown')}): {probs1[1]*100:.2f}%")
-          print("="*60 + "\n")
+          # Use multiclass model with CT as MRI input
+          out1 = MODEL_MULTI(ct=ct_inp, mri=None)
+          if out1 is not None:
+            logits = out1['logits'] if isinstance(out1, dict) and 'logits' in out1 else out1
+            print(f"📈 Raw Logits: {logits.cpu().numpy()[0]}")
+            
+            probs1 = torch.softmax(logits, dim=1).cpu().numpy()[0].tolist()
+            pred1 = int(logits.argmax(dim=1).item())
+            
+            print(f"\n🎯 Prediction Index: {pred1}")
+            print(f"📊 Probabilities: {[f'{p:.4f}' for p in probs1]}")
+            print(f"🏷️  Label Map: {LABEL_MAP_MULTI}")
+            
+            final_probs = probs1
+            final_prediction = LABEL_MAP_MULTI.get(pred1, str(pred1))
+            
+            print(f"\n✅ Final Prediction: {final_prediction}")
+            print(f"   Class 0 ({LABEL_MAP_MULTI.get(0, 'Unknown')}): {probs1[0]*100:.2f}%")
+            print(f"   Class 1 ({LABEL_MAP_MULTI.get(1, 'Unknown')}): {probs1[1]*100:.2f}%")
+            print(f"   Class 2 ({LABEL_MAP_MULTI.get(2, 'Unknown')}): {probs1[2]*100:.2f}%")
+            print("="*60 + "\n")
 
       except Exception:
         raise
 
       preds['ct'] = {
         'filename': ct_file.filename,
-        'stage1_pred': LABEL_MAP_BIN.get(pred1, None),
+        'model_used': 'multiclass',
+        'stage1_pred': LABEL_MAP_MULTI.get(pred1, None),
         'stage1_probs': probs1
       }
 
@@ -4783,7 +4777,9 @@ async def predict(
       is_healthy = final_prediction and str(final_prediction).lower() in ['healthy', 'no_tumor', 'no tumor']
       try:
         if not is_healthy:
-          hm = grad_cam(MODEL_BIN, ct_inp, target_class=pred1, target_layer='layer4')
+          # Use ct_encoder.layer4 for multiclass model
+          target_layer = 'ct_encoder.layer4' if hasattr(MODEL_MULTI, 'ct_encoder') else 'layer4'
+          hm = grad_cam(MODEL_MULTI, ct_inp, target_class=pred1, target_layer=target_layer, input_key='ct')
           if hm is not None:
             hm_arr = (hm * 255).astype('uint8')
             target_size = (ct_img.width, ct_img.height)
