@@ -141,7 +141,8 @@ class FirebaseAuth:
     def verify_token(token: str) -> Optional[Dict[str, Any]]:
         """Verify Firebase ID token"""
         try:
-            decoded_token = auth.verify_id_token(token)
+            # Verify and decode the token
+            decoded_token = auth.verify_id_token(token, check_revoked=False)
             
             # Get user data from Firestore
             db = get_firestore_db()
@@ -154,12 +155,19 @@ class FirebaseAuth:
                 'username': user_data.get('username', decoded_token.get('name', 'User'))
             }
             
-        except auth.InvalidIdTokenError:
+        except auth.InvalidIdTokenError as e:
+            print(f"❌ Invalid token: {e}")
             return None
-        except auth.ExpiredIdTokenError:
+        except auth.ExpiredIdTokenError as e:
+            print(f"❌ Token expired: {e}")
+            return None
+        except auth.RevokedIdTokenError as e:
+            print(f"❌ Token revoked: {e}")
             return None
         except Exception as e:
-            print(f"Token verification error: {e}")
+            print(f"❌ Token verification error: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     

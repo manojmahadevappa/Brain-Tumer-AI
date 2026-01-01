@@ -192,7 +192,7 @@ def calculate_model_metrics(y_true, y_pred, y_pred_proba=None, model_type='binar
 PROJECT_METRICS = {
     'binary_model': {
         'model_name': 'CT Binary Tumor Detector',
-        'architecture': 'ResNet-50 (Transfer Learning)',
+        'architecture': 'Dual ResNet-18 (Transfer Learning)',
         'dataset_size': {'train': 2847, 'validation': 712, 'test': 356},
         'metrics': {
             'accuracy': 0.9747,
@@ -221,7 +221,7 @@ PROJECT_METRICS = {
     },
     'multiclass_model': {
         'model_name': 'MRI Multiclass Tumor Classifier',
-        'architecture': 'Dual-Encoder ResNet-50 (Multimodal)',
+        'architecture': 'Dual-Encoder ResNet-18 (Multimodal)',
         'dataset_size': {'train': 3521, 'validation': 881, 'test': 440},
         'classes': ['Healthy', 'Benign', 'Malignant'],
         'metrics': {
@@ -372,22 +372,33 @@ SEVERITY_MAPPING = {
 def get_authenticated_user(authorization: Optional[str] = Header(None)):
     """Get current user from authorization header, return 401 with message if not authenticated"""
     
-    if not authorization or not authorization.startswith('Bearer '):
-        # Return 401 with message for frontend to handle redirect
+    if not authorization:
+        print("❌ No authorization header provided")
+        raise HTTPException(
+            status_code=401,
+            detail="Please log in to access this feature"
+        )
+    
+    if not authorization.startswith('Bearer '):
+        print(f"❌ Invalid authorization format: {authorization[:20]}...")
         raise HTTPException(
             status_code=401,
             detail="Please log in to access this feature"
         )
     
     token = authorization.split(' ')[1]
+    print(f"🔍 Verifying token: {token[:20]}...")
+    
     user_data = FirebaseAuth.verify_token(token)
     
     if not user_data:
+        print("❌ Token verification failed - invalid or expired")
         raise HTTPException(
             status_code=401,
             detail="Your session has expired. Please log in again"
         )
     
+    print(f"✅ User authenticated: {user_data.get('username')}")
     return user_data
 
 
@@ -407,6 +418,16 @@ def get_optional_user(authorization: Optional[str] = Header(None)):
 async def login_page():
     """Serve login page"""
     login_path = os.path.join(os.path.dirname(__file__), 'login.html')
+    with open(login_path, 'r', encoding='utf-8') as f:
+        return HTMLResponse(content=f.read())
+
+
+@app.get("/test-auth", response_class=HTMLResponse)
+async def test_auth_page():
+    """Serve authentication test page"""
+    test_path = os.path.join(os.path.dirname(__file__), 'test_auth.html')
+    with open(test_path, 'r', encoding='utf-8') as f:
+        return HTMLResponse(content=f.read())
     with open(login_path, 'r', encoding='utf-8') as f:
         return HTMLResponse(content=f.read())
 
@@ -463,6 +484,7 @@ async def login(request: dict):
         return JSONResponse({
             'success': True,
             'token': result['token'],
+            'refresh_token': result.get('refresh_token', ''),
             'username': result['username'],
             'user_id': result['user_id'],
             'redirect': '/'
@@ -480,10 +502,116 @@ async def logout(authorization: Optional[str] = Header(None)):
     return JSONResponse({'success': True, 'message': 'Logged out'})
 
 
+@app.post("/api/refresh-token")
+async def refresh_token(request: dict):
+    """Refresh an expired Firebase token"""
+    import requests
+    
+    try:
+        refresh_token = request.get('refresh_token', '')
+        
+        if not refresh_token:
+            return JSONResponse({'error': 'Refresh token required'}, status_code=400)
+        
+        # Firebase Web API key
+        api_key = os.getenv('FIREBASE_WEB_API_KEY', 'AIzaSyAVZxSPlhtKN-28R1VHWoVjzkhKqKTe0O8')
+        
+        # Call Firebase token refresh API
+        url = f'https://securetoken.googleapis.com/v1/token?key={api_key}'
+        payload = {
+            'grant_type': 'refresh_token',
+            'refresh_token': refresh_token
+        }
+        
+        response = requests.post(url, json=payload)
+        data = response.json()
+        
+        if response.status_code == 200:
+            return JSONResponse({
+                'success': True,
+                'token': data['id_token'],
+                'refresh_token': data['refresh_token']
+            })
+        else:
+            return JSONResponse({
+                'success': False,
+                'error': 'Failed to refresh token'
+            }, status_code=401)
+            
+    except Exception as e:
+        print(f"Token refresh error: {e}")
+        return JSONResponse({'error': 'Token refresh failed'}, status_code=500)
+
+
 @app.get("/api/metrics")
 async def get_metrics():
     """Get comprehensive project metrics for reporting and analysis"""
     return JSONResponse(PROJECT_METRICS)
+
+
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint with service status"""
+    import webapp.init_services as init_services
+    
+    health = {
+        'status': 'ok',
+        'services': {
+            'firebase': 'initialized' if init_services.firestore_client else 'not initialized',
+            'groq': 'initialized' if init_services.groq_client else 'not initialized',
+        },
+        'timestamp': datetime.utcnow().isoformat()
+    }
+    
+    # Try to verify Firebase connection
+    if init_services.firestore_client:
+        try:
+            # Test Firestore connection
+            db = init_services.firestore_client
+            db.collection('_health_check').document('test').set({'timestamp': datetime.utcnow()})
+            health['services']['firebase'] = 'connected'
+        except Exception as e:
+            health['services']['firebase'] = f'error: {str(e)}'
+            health['status'] = 'degraded'
+    
+    return JSONResponse(health)
+
+
+@app.get("/api/debug/auth")
+async def debug_auth(authorization: Optional[str] = Header(None)):
+    """Debug endpoint to check authentication status"""
+    import webapp.init_services as init_services
+    
+    debug_info = {
+        'firebase_initialized': init_services.firestore_client is not None,
+        'authorization_header': authorization[:50] + '...' if authorization and len(authorization) > 50 else authorization,
+        'has_bearer': authorization.startswith('Bearer ') if authorization else False,
+    }
+    
+    if authorization and authorization.startswith('Bearer '):
+        token = authorization.split(' ')[1]
+        debug_info['token_length'] = len(token)
+        debug_info['token_preview'] = token[:20] + '...'
+        
+        try:
+            user_data = FirebaseAuth.verify_token(token)
+            debug_info['token_valid'] = user_data is not None
+            if user_data:
+                debug_info['user_id'] = user_data.get('user_id')
+                debug_info['username'] = user_data.get('username')
+        except Exception as e:
+            debug_info['token_valid'] = False
+            debug_info['error'] = str(e)
+    
+    return JSONResponse(debug_info)
+
+
+@app.get("/test-auth", response_class=HTMLResponse)
+async def test_auth_page():
+    """Serve auth test page"""
+    test_path = os.path.join(os.path.dirname(__file__), 'test_auth.html')
+    with open(test_path, 'r', encoding='utf-8') as f:
+        return HTMLResponse(content=f.read())
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
@@ -515,11 +643,25 @@ async def get_dashboard_data(
         
         for analysis in analyses:
             try:
-                created_at = datetime.fromisoformat(analysis.get('created_at', ''))
-                if created_at >= month_start:
+                created_at_str = analysis.get('created_at', '')
+                if not created_at_str:
+                    continue
+                    
+                # Handle timezone info in ISO format (Z or +00:00)
+                created_at_str = created_at_str.replace('Z', '+00:00')
+                created_at = datetime.fromisoformat(created_at_str)
+                
+                # Convert to naive datetime in UTC if it's timezone-aware
+                if created_at.tzinfo is not None:
+                    created_at = created_at.replace(tzinfo=None)
+                
+                # Check if in current month and year
+                if (created_at.year == now.year and 
+                    created_at.month == now.month):
                     month_analyses += 1
-            except:
-                pass
+            except Exception as e:
+                print(f"Error parsing date for analysis: {e}, value: {analysis.get('created_at', 'N/A')}")
+                continue
         
         # Count total chat messages
         total_messages = FirebaseChat.get_user_total_messages(user_id)
@@ -1208,7 +1350,7 @@ async def index(authorization: Optional[str] = Header(None)):
         <div class="text-center">
           <i class="fas fa-layer-group text-4xl text-purple-600 mb-2"></i>
           <p class="text-sm font-semibold text-gray-700">Deep Learning Model</p>
-          <p class="text-2xl font-bold text-gray-900">ResNet-50</p>
+          <p class="text-2xl font-bold text-gray-900">Dual ResNet-18</p>
         </div>
         <div class="text-center">
           <i class="fas fa-bolt text-4xl text-yellow-600 mb-2"></i>
@@ -1228,7 +1370,7 @@ async def index(authorization: Optional[str] = Header(None)):
             About <span class="text-blue-700">MediscopeAI</span>
           </h2>
           <p class="text-gray-600 text-lg leading-relaxed mb-6">
-            MediscopeAI leverages cutting-edge deep learning technology to assist medical professionals in brain tumor detection and analysis. Our AI model, built on the ResNet-50 architecture, has been trained on over 3,000 medical imaging samples to achieve industry-leading accuracy.
+            MediscopeAI leverages cutting-edge deep learning technology to assist medical professionals in brain tumor detection and analysis. Our AI model, built on the Dual ResNet-18 architecture, has been trained on over 3,000 medical imaging samples to achieve industry-leading accuracy.
           </p>
           <p class="text-gray-600 text-lg leading-relaxed mb-6">
             The platform provides instant analysis of CT and MRI scans, delivering comprehensive diagnostic insights in under a second. Our technology empowers clinicians with AI-powered decision support while maintaining the critical human expertise at the center of patient care.
@@ -1251,7 +1393,7 @@ async def index(authorization: Optional[str] = Header(None)):
         <div class="relative">
           <img src="https://images.unsplash.com/photo-1559757175-0eb30cd8c063?w=800" alt="Medical AI Technology" class="rounded-2xl shadow-2xl" />
           <div class="absolute -bottom-6 -left-6 bg-blue-600 text-white p-6 rounded-xl shadow-xl">
-            <div class="text-3xl font-bold mb-1">ResNet-50</div>
+            <div class="text-3xl font-bold mb-1">Dual ResNet-18</div>
             <div class="text-blue-100">Deep Learning Model</div>
           </div>
         </div>
@@ -2300,7 +2442,7 @@ async def documentation_page():
             The model has been trained on 3000+ annotated medical images with rigorous validation protocols. Key features include attention mechanisms for interpretability, which allows clinicians to understand which regions of the image contributed to the prediction.
           </p>
           <ul class="list-disc list-inside space-y-2 text-gray-600 ml-4">
-            <li>ResNet-50 backbone with medical imaging optimizations</li>
+            <li>Dual ResNet-18 backbone with medical imaging optimizations</li>
             <li>Multi-modal fusion for CT and MRI analysis</li>
             <li>Attention mechanisms for feature importance and explainability</li>
             <li>97.5% accuracy on 3000+ training dataset with cross-validation</li>
@@ -3635,7 +3777,7 @@ async def security_page():
     return HTMLResponse(content=html)
 
 @app.get('/results', response_class=HTMLResponse)
-async def results_page(user_session: dict = Depends(get_authenticated_user)):
+async def results_page(user_session: dict = Depends(get_optional_user)):
     global LATEST_RESULT
     
     if LATEST_RESULT is None:
@@ -3674,8 +3816,8 @@ async def results_page(user_session: dict = Depends(get_authenticated_user)):
 
 
 @app.get('/chatbot', response_class=HTMLResponse)
-async def chatbot_page(user_session: dict = Depends(get_authenticated_user)):
-    """Chatbot page - requires authentication"""
+async def chatbot_page(user_session: dict = Depends(get_optional_user)):
+    """Chatbot page - authentication handled in JavaScript"""
     html_content = """
 <!DOCTYPE html>
 <html lang="en">
@@ -3955,7 +4097,7 @@ async def chatbot_page(user_session: dict = Depends(get_authenticated_user)):
     return HTMLResponse(content=html_content)
 
 @app.get('/assistant', response_class=HTMLResponse)
-async def assistant_page(user_session: dict = Depends(get_authenticated_user)):
+async def assistant_page(user_session: dict = Depends(get_optional_user)):
     # Read the assistant page template
     template_path = os.path.join(os.path.dirname(__file__), 'assistant_page.html')
     try:

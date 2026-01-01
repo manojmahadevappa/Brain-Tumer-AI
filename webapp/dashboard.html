@@ -378,8 +378,45 @@
       }
       
       localStorage.removeItem('auth_token');
+      localStorage.removeItem('refresh_token');
       localStorage.removeItem('username');
       window.location.href = '/login';
+    }
+
+    // Try to refresh the token
+    async function tryRefreshToken() {
+      const refreshToken = localStorage.getItem('refresh_token');
+      
+      if (!refreshToken) {
+        console.log('No refresh token available');
+        return false;
+      }
+
+      try {
+        console.log('Attempting to refresh token...');
+        const response = await fetch('/api/refresh-token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refresh_token: refreshToken })
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          if (data.success) {
+            console.log('✅ Token refreshed successfully');
+            localStorage.setItem('auth_token', data.token);
+            localStorage.setItem('refresh_token', data.refresh_token);
+            currentUser.token = data.token;
+            return true;
+          }
+        }
+        
+        console.log('Token refresh failed');
+        return false;
+      } catch (error) {
+        console.error('Token refresh error:', error);
+        return false;
+      }
     }
 
     // Global variable to store all analyses
@@ -522,6 +559,12 @@
 
         if (!response.ok) {
           if (response.status === 401) {
+            // Try to refresh token before logging out
+            const refreshed = await tryRefreshToken();
+            if (refreshed) {
+              // Retry the request with new token
+              return loadDashboard();
+            }
             logout();
             return;
           }
